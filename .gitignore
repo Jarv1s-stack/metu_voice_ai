@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+env
+!env
+.env.
+!.env.
+
 
 # зависимости и мусор
 node_modules/
