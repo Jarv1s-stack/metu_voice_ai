@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Голос</title>
+<style>
+  :root {
+    --bg: #fafaf8; --fg: #111113; --muted: #9a9aa1; --line: #e3e3df; --orb: 17, 17, 19;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #09090b; --fg: #f0f0f2; --muted: #66666e; --line: #232327; --orb: 240, 240, 242; }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 400 15px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  header { display: flex; justify-content: flex-end; padding: 20px 24px; }
+  #lang {
+    background: none; border: 0; color: var(--muted); font: 500 12px/1 inherit; letter-spacing: .12em;
+    cursor: pointer; padding: 8px; transition: color .2s;
+  }
+  #lang:hover { color: var(--fg); }
+
+  main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; }
+  .stage { position: relative; width: min(86vw, 420px); aspect-ratio: 1; display: grid; place-items: center; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  #mic {
+    position: relative; z-index: 1; width: 92px; height: 92px; border-radius: 50%;
+    border: 1px solid var(--fg); background: var(--bg); color: var(--fg); cursor: pointer;
+    display: grid; place-items: center; transition: transform .5s cubic-bezier(.2,.8,.2,1), background .3s, color .3s, opacity .4s;
+  }
+  #mic:hover { transform: scale(1.05); }
+  #mic:active { transform: scale(.96); }
+  #mic:disabled { opacity: .3; cursor: not-allowed; }
+  #mic svg { width: 26px; height: 26px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  #mic .stop { display: none; }
+  body[data-state="listening"] #mic, body[data-state="speaking"] #mic { background: var(--fg); color: var(--bg); transform: scale(.9); }
+  body[data-state="listening"] #mic .mic, body[data-state="speaking"] #mic .mic { display: none; }
+  body[data-state="listening"] #mic .stop, body[data-state="speaking"] #mic .stop { display: block; }
+  body[data-state="thinking"] #mic { transform: scale(.82); opacity: .5; }
+
+  #caption {
+    height: 96px; width: min(86vw, 520px); text-align: center; color: var(--muted);
+    overflow-y: auto; padding: 0 4px; transition: color .3s; scrollbar-width: none;
+  }
+  #caption::-webkit-scrollbar { display: none; }
+  #caption.reply { color: var(--fg); }
+  #caption span { animation: rise .5s ease both; display: inline-block; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  footer { padding: 12px 24px 28px; display: flex; justify-content: center; }
+  form { width: min(100%, 520px); display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); transition: border-color .25s; }
+  form:focus-within { border-color: var(--fg); }
+  input {
+    flex: 1; background: none; border: 0; outline: 0; color: var(--fg); font: inherit; padding: 12px 0;
+  }
+  input::placeholder { color: var(--muted); }
+  form button {
+    background: none; border: 0; color: var(--muted); cursor: pointer; padding: 8px; display: grid; place-items: center; transition: color .2s, transform .2s;
+  }
+  form button:hover { color: var(--fg); transform: translateX(2px); }
+  form button svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body data-state="idle">
+<header><button id="lang" title="Язык распознавания">RU</button></header>
+
+<main>
+  <div class="stage">
+    <canvas id="orb"></canvas>
+    <button id="mic" aria-label="Говорить">
+      <svg class="mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <svg class="stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></svg>
+    </button>
+  </div>
+  <div id="caption"></div>
+</main>
+
+<footer>
+  <form id="form" autocomplete="off">
+    <input id="text" type="text" placeholder="Или напиши здесь — ответ придёт текстом" aria-label="Текстовое сообщение">
+    <button type="submit" aria-label="Отправить"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+  </form>
+</footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const body = document.body, mic = $("#mic"), caption = $("#caption"), canvas = $("#orb"), ctx2d = canvas.getContext("2d");
+let previousId = null;
+let state = "idle", rec = null, recText = "", audio = null, analyser = null, freq = null, actx = null, busy = false;
+
+const LANGS = [["RU", "ru-RU"], ["KZ", "kk-KZ"], ["EN", "en-US"]];
+let langIdx = 0;
+$("#lang").onclick = () => { langIdx = (langIdx + 1) % LANGS.length; $("#lang").textContent = LANGS[langIdx][0]; };
+
+function setState(s) { state = s; body.dataset.state = s; }
+function say(text, reply = false) {
+  caption.className = reply ? "reply" : "";
+  caption.innerHTML = ""; const el = document.createElement("span"); el.textContent = text; caption.appendChild(el);
+  caption.scrollTop = 0;
+}
+
+/* ---------- API ---------- */
+async function ask(text) {
+  const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, previousId }) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || "Ошибка");
+  if (d.id) previousId = d.id;
+  return d.reply;
+}
+async function speak(text) {
+  const r = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  if (!r.ok) throw new Error((await r.json()).error || "Ошибка озвучки");
+  const url = URL.createObjectURL(await r.blob());
+  audio = new Audio(url);
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  if (actx.state === "suspended") await actx.resume();
+  const src = actx.createMediaElementSource(audio);
+  analyser = actx.createAnalyser(); analyser.fftSize = 256; analyser.smoothingTimeConstant = .8;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  src.connect(analyser); analyser.connect(actx.destination);
+  return new Promise((resolve) => {
+    audio.onended = audio.onerror = () => { URL.revokeObjectURL(url); analyser = null; audio = null; resolve(); };
+    audio.play().catch(() => { analyser = null; audio = null; resolve(); });
+  });
+}
+
+/* ---------- голосовой режим ---------- */
+async function handleVoice(text) {
+  busy = true; setState("thinking"); say("…");
+  try {
+    const reply = await ask(text);
+    say(reply, true); setState("speaking");
+    await speak(reply);
+  } catch (e) { say(e.message); }
+  busy = false; setState("idle");
+}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { mic.disabled = true; say("Браузер не поддерживает голосовой ввод. Напиши внизу."); }
+else say("Нажми и говори");
+
+mic.onclick = () => {
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  if (actx.state === "suspended") actx.resume();
+  if (state === "speaking") { audio && (audio.pause(), audio.dispatchEvent(new Event("ended"))); return; }
+  if (state === "listening") { rec && rec.stop(); return; }
+  if (busy) return;
+  recText = "";
+  rec = new SR(); rec.lang = LANGS[langIdx][1]; rec.interimResults = true; rec.continuous = false;
+  rec.onstart = () => { setState("listening"); say("Слушаю…"); };
+  rec.onresult = (e) => { recText = [...e.results].map((r) => r[0].transcript).join(" "); say(recText); };
+  rec.onerror = (e) => { if (e.error === "not-allowed") say("Нужен доступ к микрофону"); else if (e.error !== "no-speech" && e.error !== "aborted") say("Ошибка распознавания: " + e.error); };
+  rec.onend = () => { const t = recText.trim(); if (t) handleVoice(t); else { setState("idle"); if (caption.textContent === "Слушаю…") say("Нажми и говори"); } };
+  rec.start();
+};
+
+/* ---------- текстовый режим (без озвучки) ---------- */
+$("#form").onsubmit = async (e) => {
+  e.preventDefault();
+  const input = $("#text"), text = input.value.trim();
+  if (!text || busy) return;
+  input.value = ""; busy = true; setState("thinking"); say("…");
+  try { say(await ask(text), true); } catch (err) { say(err.message); }
+  busy = false; setState("idle");
+};
+
+/* ---------- анимация ---------- */
+let W = 0, amp = 0, spin = 0, t = 0, glow = 0;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2), r = canvas.getBoundingClientRect();
+  W = r.width; canvas.width = canvas.height = Math.round(W * dpr); ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener("resize", resize); resize();
+
+function level() {
+  if (!analyser) return 0;
+  analyser.getByteFrequencyData(freq);
+  let s = 0; const n = Math.floor(freq.length * .6);
+  for (let i = 0; i < n; i++) s += freq[i];
+  return Math.min(1, (s / n / 255) * 2.2);
+}
+
+function frame(now) {
+  const dt = Math.min(.05, (now - (frame.last || now)) / 1000); frame.last = now; t += dt;
+  const orbRGB = getComputedStyle(document.documentElement).getPropertyValue("--orb").trim();
+  let target = .06, speed = .5, gTarget = 0;
+  if (state === "listening") { target = .22 + .12 * Math.sin(t * 2.3) * Math.sin(t * .7); speed = 1.4; gTarget = .5; }
+  else if (state === "thinking") { target = .1; speed = 3.2; gTarget = .25; }
+  else if (state === "speaking") { target = .08 + level() * .75; speed = 1.8; gTarget = .7; }
+  amp += (target - amp) * (state === "speaking" ? .22 : .06);
+  glow += (gTarget - glow) * .05;
+  spin += dt * speed * .4;
+
+  const c = W / 2, base = W * .27, k = W * .13;
+  ctx2d.clearRect(0, 0, W, W);
+
+  const g = ctx2d.createRadialGradient(c, c, base * .6, c, c, base + k * 1.6);
+  g.addColorStop(0, `rgba(${orbRGB},${.0})`); g.addColorStop(.55, `rgba(${orbRGB},${.07 * glow})`); g.addColorStop(1, `rgba(${orbRGB},0)`);
+  ctx2d.fillStyle = g; ctx2d.fillRect(0, 0, W, W);
+
+  for (let i = 0; i < 4; i++) {
+    ctx2d.beginPath();
+    const N = 140, ph = i * 1.7, wob = 1 - i * .18;
+    for (let j = 0; j <= N; j++) {
+      const a = (j / N) * Math.PI * 2;
+      const n = Math.sin(a * 3 + t * speed + ph) * .5 + Math.sin(a * 5 - t * speed * 1.3 + ph * 2) * .3 + Math.sin(a * 2 + spin + ph) * .4;
+      const r = base + i * W * .012 + n * amp * k * wob + Math.sin(t * .9 + i) * W * .004;
+      const x = c + Math.cos(a + spin * .3) * r, y = c + Math.sin(a + spin * .3) * r;
+      j ? ctx2d.lineTo(x, y) : ctx2d.moveTo(x, y);
+    }
+    ctx2d.closePath();
+    ctx2d.strokeStyle = `rgba(${orbRGB},${(.5 - i * .11) * (.35 + glow * .65)})`;
+    ctx2d.lineWidth = 1.1;
+    ctx2d.stroke();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
